@@ -85,9 +85,37 @@ declare namespace browser {
       windowId?: number;
       openerTabId?: number;
     }): Promise<Tab>;
+    function get(tabId: number): Promise<Tab>;
     function remove(tabId: number): Promise<void>;
     function group(props: { tabIds: number[]; groupId?: number }): Promise<number>;
     const onUpdated: BrowserEvent<(tabId: number, changeInfo: TabChangeInfo, tab: Tab) => void>;
+    const onCreated: BrowserEvent<(tab: Tab) => void>;
+    const onRemoved: BrowserEvent<(tabId: number) => void>;
+  }
+
+  // Firefox only
+  namespace webRequest {
+    interface RequestDetails {
+      requestId: string;
+      url: string;
+      method: string;
+      tabId: number;
+      type: string;
+    }
+    interface BlockingResponse {
+      cancel?: boolean;
+    }
+    interface RequestFilter {
+      urls: string[];
+      types?: string[];
+    }
+    interface RequestEvent<T extends (details: RequestDetails) => unknown> {
+      addListener(callback: T, filter: RequestFilter, extraInfoSpec?: string[]): void;
+      removeListener(callback: T): void;
+    }
+    const onBeforeRequest: RequestEvent<(details: RequestDetails) => Promise<BlockingResponse> | BlockingResponse>;
+    const onCompleted: RequestEvent<(details: RequestDetails) => void>;
+    const onErrorOccurred: RequestEvent<(details: RequestDetails) => void>;
   }
 
   namespace contextMenus {

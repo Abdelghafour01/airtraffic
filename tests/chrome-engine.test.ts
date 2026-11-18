@@ -92,8 +92,8 @@ describe("chromeEngine", () => {
     assert.deepEqual(await chromeEngine.listDestinations(), []);
   });
 
-  it("shouldSkip always returns false", () => {
-    assert.equal(chromeEngine.shouldSkip(123), false);
+  it("does not route before the request (uses tabs.onUpdated + applyRoute)", () => {
+    assert.equal(chromeEngine.startPreRequestRouting, undefined);
   });
 
   it("applyRoute creates a new group, titles/colors it, and returns true when none exists", async () => {

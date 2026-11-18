@@ -4,6 +4,8 @@ import { isIgnoredUrl, resolveRoute } from "../core/route-resolver";
 import { loadRulesFromStorage, loadSettingsFromStorage } from "../core/storage";
 
 const BADGE_CLEAR_MS = 3000;
+// A blocking handler must never hang navigation: past this, let the request through.
+const READY_TIMEOUT_MS = 2000;
 
 export function runBackground(engine: Engine): void {
   let cachedRules: Rule[] = [];
@@ -26,10 +28,9 @@ export function runBackground(engine: Engine): void {
     setTimeout(() => browser.action.setBadgeText({ text: "" }), BADGE_CLEAR_MS);
   }
 
-  async function handleTabUpdate(tabId: number, changeInfo: TabChangeInfo, tab: Tab): Promise<void> {
+  async function handleTabUpdate(_tabId: number, changeInfo: TabChangeInfo, tab: Tab): Promise<void> {
     if (!changeInfo.url) return;
     await ready;
-    if (engine.shouldSkip(tabId)) return;
     if (tab.id == null || tab.windowId == null) return;
 
     const engineTab: EngineTab = {
@@ -40,7 +41,6 @@ export function runBackground(engine: Engine): void {
       active: tab.active ?? false,
       cookieStoreId: tab.cookieStoreId,
       groupId: tab.groupId,
-      openerTabId: tab.openerTabId,
     };
 
     const current = await engine.currentDestinationId(engineTab);
@@ -99,7 +99,26 @@ export function runBackground(engine: Engine): void {
     }
   });
 
-  browser.tabs.onUpdated.addListener(handleTabUpdate);
+  if (engine.startPreRequestRouting) {
+    engine.startPreRequestRouting(
+      async (url, currentDestinationId) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<false>((r) => {
+          timer = setTimeout(() => r(false), READY_TIMEOUT_MS);
+        });
+        const loaded = await Promise.race([ready.then(() => true as const), timeout]).finally(() => clearTimeout(timer));
+        if (!loaded) return null;
+        const result = resolveRoute(url, cachedRules, cachedSettings, currentDestinationId);
+        return result.action === "route" ? result.destinationId : null;
+      },
+      () => {
+        redirectCount++;
+        showBadge(`${redirectCount}`);
+      },
+    );
+  } else {
+    browser.tabs.onUpdated.addListener(handleTabUpdate);
+  }
 
   buildContextMenus();
 }

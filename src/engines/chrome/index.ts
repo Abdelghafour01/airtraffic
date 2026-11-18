@@ -34,10 +34,6 @@ async function deleteDestination(id: string): Promise<void> {
   await saveDestinationsToStorage(destinations.filter((d) => d.id !== id));
 }
 
-function shouldSkip(): boolean {
-  return false;
-}
-
 async function currentDestinationId(tab: EngineTab): Promise<string> {
   if (tab.groupId === undefined || tab.groupId === browser.tabGroups.TAB_GROUP_ID_NONE) return "";
   try {
@@ -121,7 +117,6 @@ export const chromeEngine: Engine = {
   createDestination,
   updateDestination,
   deleteDestination,
-  shouldSkip,
   currentDestinationId,
   applyRoute,
   openInDestination,

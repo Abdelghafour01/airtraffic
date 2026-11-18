@@ -9,7 +9,7 @@
     "48": "icons/icon-48.png",
     "96": "icons/icon-96.png"
   },
-  "permissions": ["contextualIdentities", "cookies", "tabs", "contextMenus", "storage"],
+  "permissions": ["contextualIdentities", "cookies", "tabs", "contextMenus", "storage", "webRequest", "webRequestBlocking"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "scripts": ["background.js"]
