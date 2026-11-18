@@ -3,6 +3,9 @@ import type { NewDestination } from "../../core/types";
 import { CONTAINER_COLORS, CONTAINER_ICONS } from "./colors";
 
 const MAX_TRACKED_REQUESTS = 1000;
+const REVERT_SUPPRESS_MS = 1000;
+// Tabs we are sending back after a same-document navigation: their next history event is our own.
+const revertingTabs = new Set<number>();
 // Tabs that have never loaded a real page (new tab, window.open, ...): safe to close when routed.
 const blankTabs = new Set<number>();
 // Request ids of main_frame navigations already seen. Firefox keeps the id across a redirect chain.
@@ -54,14 +57,23 @@ async function currentDestinationId(tab: EngineTab): Promise<string> {
  * stays on its previous page (Back keeps working) and the new tab becomes its child.
  */
 async function applyRoute(tab: EngineTab, destinationId: string): Promise<boolean> {
-  const exists = await containerExists(destinationId);
-  if (!exists) {
+  const closeOld = blankTabs.has(tab.id);
+  const opened = await openInContainer(tab, destinationId, closeOld ? tab.openerTabId : tab.id);
+  if (!opened) return false;
+
+  if (closeOld) {
+    Promise.resolve(browser.tabs.remove(tab.id)).catch((err) => {
+      console.warn(`[Air Traffic] Failed to close original tab ${tab.id}`, err);
+    });
+  }
+  return true;
+}
+
+async function openInContainer(tab: EngineTab, destinationId: string, openerTabId: number | undefined): Promise<boolean> {
+  if (!(await containerExists(destinationId))) {
     console.warn(`[Air Traffic] Container ${destinationId} not found, skipping redirect`);
     return false;
   }
-
-  const closeOld = blankTabs.has(tab.id);
-  const openerTabId = closeOld ? tab.openerTabId : tab.id;
 
   try {
     await browser.tabs.create({
@@ -72,17 +84,11 @@ async function applyRoute(tab: EngineTab, destinationId: string): Promise<boolea
       windowId: tab.windowId,
       ...(openerTabId !== undefined ? { openerTabId } : {}),
     });
+    return true;
   } catch (err) {
     console.warn(`[Air Traffic] Failed to reopen tab ${tab.id} in ${destinationId}`, err);
     return false;
   }
-
-  if (closeOld) {
-    Promise.resolve(browser.tabs.remove(tab.id)).catch((err) => {
-      console.warn(`[Air Traffic] Failed to close original tab ${tab.id}`, err);
-    });
-  }
-  return true;
 }
 
 function startPreRequestRouting(resolve: PreRequestResolver, onRouted: () => void): void {
@@ -149,6 +155,41 @@ function startPreRequestRouting(resolve: PreRequestResolver, onRouted: () => voi
     filter,
     ["blocking"],
   );
+
+  // Same-document navigations (history.pushState, e.g. Turbo/pjax) send no request, so
+  // onBeforeRequest never sees them. Open the URL in the container and send this tab back.
+  // Redirect chains are not handled here: they stay with the first-request rule above.
+  browser.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
+    if (details.frameId !== 0 || details.tabId < 0) return;
+    if (revertingTabs.delete(details.tabId)) return;
+
+    try {
+      const tab = await browser.tabs.get(details.tabId);
+      const engineTab: EngineTab = {
+        id: details.tabId,
+        url: details.url,
+        windowId: tab.windowId ?? -1,
+        index: tab.index,
+        active: tab.active ?? false,
+        cookieStoreId: tab.cookieStoreId,
+      };
+      const destinationId = await resolve(details.url, await currentDestinationId(engineTab));
+      if (!destinationId) return;
+      if (!(await openInContainer(engineTab, destinationId, details.tabId))) return;
+      onRouted();
+
+      revertingTabs.add(details.tabId);
+      setTimeout(() => revertingTabs.delete(details.tabId), REVERT_SUPPRESS_MS);
+      try {
+        await browser.tabs.goBack(details.tabId);
+      } catch (err) {
+        revertingTabs.delete(details.tabId);
+        console.warn(`[Air Traffic] Failed to send tab ${details.tabId} back`, err);
+      }
+    } catch (err) {
+      console.warn(`[Air Traffic] Failed to route navigation in tab ${details.tabId}`, err);
+    }
+  });
 }
 
 async function openInDestination(url: string, destinationId: string, refTab: EngineTab): Promise<void> {

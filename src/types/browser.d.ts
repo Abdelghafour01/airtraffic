@@ -87,6 +87,7 @@ declare namespace browser {
     }): Promise<Tab>;
     function get(tabId: number): Promise<Tab>;
     function remove(tabId: number): Promise<void>;
+    function goBack(tabId: number): Promise<void>;
     function group(props: { tabIds: number[]; groupId?: number }): Promise<number>;
     const onUpdated: BrowserEvent<(tabId: number, changeInfo: TabChangeInfo, tab: Tab) => void>;
     const onCreated: BrowserEvent<(tab: Tab) => void>;
@@ -116,6 +117,16 @@ declare namespace browser {
     const onBeforeRequest: RequestEvent<(details: RequestDetails) => Promise<BlockingResponse> | BlockingResponse>;
     const onCompleted: RequestEvent<(details: RequestDetails) => void>;
     const onErrorOccurred: RequestEvent<(details: RequestDetails) => void>;
+  }
+
+  // Firefox only
+  namespace webNavigation {
+    interface HistoryStateDetails {
+      tabId: number;
+      frameId: number;
+      url: string;
+    }
+    const onHistoryStateUpdated: BrowserEvent<(details: HistoryStateDetails) => void>;
   }
 
   namespace contextMenus {
