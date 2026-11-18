@@ -165,3 +165,57 @@ describe("resolveRoute", () => {
     });
   });
 });
+
+describe("real-world GitHub config (regex rules, first match wins)", () => {
+  const C1 = "firefox-container-1";
+  const C2 = "firefox-container-2";
+  const rules: Rule[] = [
+    { id: "1", pattern: ".*github.com/zalando-incubator", matchType: "regex", destinationId: C1 },
+    { id: "2", pattern: ".*github.com/enterprises/zalando-se-emu", matchType: "regex", destinationId: C2 },
+    { id: "3", pattern: ".*github.com/.*zalando-.*", matchType: "regex", destinationId: C2 },
+    { id: "4", pattern: ".*github.com/.*_zse.*", matchType: "regex", destinationId: C2 },
+    { id: "5", pattern: "github.com", matchType: "domainContains", destinationId: C1 },
+    { id: "6", pattern: ".*", matchType: "regex", destinationId: C2 },
+  ];
+  const settings: Settings = { mode: "route_matched", defaultDestinationId: "", useSync: false };
+  const route = (url: string, current: string) => resolveRoute(url, rules, settings, current);
+
+  it("positive: zalando-incubator beats the broader zalando- rule", () => {
+    assert.deepEqual(route("https://github.com/zalando-incubator/foo", C2), { action: "route", destinationId: C1 });
+  });
+
+  it("positive: enterprise and zalando-* orgs go to c2", () => {
+    assert.deepEqual(route("https://github.com/enterprises/zalando-se-emu/x", C1), { action: "route", destinationId: C2 });
+    assert.deepEqual(route("https://github.com/zalando-foo/bar", C1), { action: "route", destinationId: C2 });
+  });
+
+  it("positive: _zse repos go to c2", () => {
+    assert.deepEqual(route("https://github.com/someone/thing_zse_x", C1), { action: "route", destinationId: C2 });
+  });
+
+  it("positive: any other github.com URL goes to c1", () => {
+    assert.deepEqual(route("https://github.com/someuser/repo", C2), { action: "route", destinationId: C1 });
+    assert.deepEqual(route("https://gist.github.com/someuser/abc", C2), { action: "route", destinationId: C1 });
+  });
+
+  it("positive: everything else falls to the catch-all c2", () => {
+    assert.deepEqual(route("https://example.com", C1), { action: "route", destinationId: C2 });
+  });
+
+  it("negative: already in the right container -> none", () => {
+    assert.deepEqual(route("https://github.com/zalando-incubator/foo", C1), { action: "none" });
+    assert.deepEqual(route("https://github.com/zalando-foo/bar", C2), { action: "none" });
+    assert.deepEqual(route("https://github.com/someuser/repo", C1), { action: "none" });
+    assert.deepEqual(route("https://example.com", C2), { action: "none" });
+  });
+
+  it("negative: about: and moz-extension: URLs are never routed despite the catch-all", () => {
+    assert.deepEqual(route("about:blank", C1), { action: "none" });
+    assert.deepEqual(route("about:newtab", C1), { action: "none" });
+    assert.deepEqual(route("moz-extension://abc/options.html", C1), { action: "none" });
+  });
+
+  it("positive: matching is case-insensitive", () => {
+    assert.deepEqual(route("https://GitHub.com/Zalando-Incubator/Foo", C2), { action: "route", destinationId: C1 });
+  });
+});
