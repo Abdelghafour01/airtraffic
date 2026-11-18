@@ -7,10 +7,10 @@ function permissions(target: "firefox" | "chrome"): string[] {
   return manifest.permissions;
 }
 
-const FIREFOX_ONLY = ["webRequest", "webRequestBlocking"];
+const FIREFOX_ONLY = ["webRequest", "webRequestBlocking", "webNavigation"];
 
 describe("manifest permissions", () => {
-  it("positive: firefox requests webRequest and webRequestBlocking", () => {
+  it("positive: firefox requests webRequest, webRequestBlocking and webNavigation", () => {
     const p = permissions("firefox");
     for (const perm of FIREFOX_ONLY) assert.ok(p.includes(perm), perm);
   });

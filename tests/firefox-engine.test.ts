@@ -29,7 +29,8 @@ function installFakeBrowser() {
       (listeners[name] ??= []).push(cb);
     },
   });
-  const control = { failCreate: false, failRemove: false };
+  const goBackCalls: number[] = [];
+  const control = { failCreate: false, failGoBack: false, failRemove: false };
   const removedTabIds: number[] = [];
   let nextTabId = 100;
   let nextContainerId = 2;
@@ -74,6 +75,10 @@ function installFakeBrowser() {
         if (!tab) throw new Error("no such tab");
         return tab;
       },
+      async goBack(tabId: number) {
+        goBackCalls.push(tabId);
+        if (control.failGoBack) throw new Error("no history");
+      },
       remove(tabId: number) {
         removedTabIds.push(tabId);
         if (control.failRemove) return Promise.reject(new Error("remove failed"));
@@ -82,6 +87,9 @@ function installFakeBrowser() {
       onUpdated: event("tabs.onUpdated"),
       onRemoved: event("tabs.onRemoved"),
     },
+    webNavigation: {
+      onHistoryStateUpdated: event("onHistoryStateUpdated"),
+    },
     webRequest: {
       onBeforeRequest: event("onBeforeRequest"),
       onCompleted: event("onCompleted"),
@@ -89,7 +97,7 @@ function installFakeBrowser() {
     },
   };
 
-  return { containers, createdTabs, removedTabIds, existingTabs, listeners, control };
+  return { containers, createdTabs, removedTabIds, existingTabs, listeners, control, goBackCalls };
 }
 
 describe("firefoxEngine", () => {
@@ -320,6 +328,119 @@ describe("firefoxEngine pre-request routing", () => {
   });
 });
 
+describe("firefoxEngine same-document navigation (history.pushState)", () => {
+  const WORK = "firefox-container-1";
+  let nextId = 5000;
+
+  function setup() {
+    const fake = installFakeBrowser();
+    const routedCount = { n: 0 };
+    firefoxEngine.startPreRequestRouting!(
+      async (url, current) => (url.startsWith("https://work.example") && current !== WORK ? WORK : null),
+      () => routedCount.n++,
+    );
+    const onHistory = fake.listeners["onHistoryStateUpdated"]![0]!;
+    const newTab = (tab: Record<string, unknown> = {}) => {
+      const id = nextId++;
+      const full = { id, url: "https://example.com/", index: 3, windowId: 1, active: true, cookieStoreId: "firefox-default", ...tab };
+      fake.existingTabs.set(id, full);
+      return full as any;
+    };
+    const navigate = (tabId: number, over: Record<string, unknown> = {}) =>
+      onHistory({ tabId, frameId: 0, url: "https://work.example/repo", ...over });
+    return { fake, routedCount, newTab, navigate };
+  }
+
+  it("opens the routed URL as a child tab in the container and sends the old tab back", async () => {
+    const { fake, routedCount, newTab, navigate } = setup();
+    const tab = newTab();
+    await navigate(tab.id);
+    assert.equal(fake.createdTabs.length, 1);
+    assert.equal(fake.createdTabs[0]!.cookieStoreId, WORK);
+    assert.equal(fake.createdTabs[0]!.url, "https://work.example/repo");
+    assert.equal(fake.createdTabs[0]!.openerTabId, tab.id);
+    assert.equal(fake.createdTabs[0]!.index, tab.index + 1);
+    assert.equal(fake.createdTabs[0]!.windowId, 1);
+    assert.deepEqual(fake.goBackCalls, [tab.id]);
+    assert.deepEqual(fake.removedTabIds, []);
+    assert.equal(routedCount.n, 1);
+  });
+
+  it("never closes the old tab, even if it was blank", async () => {
+    const { fake, newTab, navigate } = setup();
+    const tab = newTab({ url: "about:blank" });
+    fake.listeners["tabs.onCreated"]!.forEach((cb) => cb(tab));
+    await navigate(tab.id);
+    assert.deepEqual(fake.removedTabIds, []);
+  });
+
+  it("does nothing when the tab is already in the right container", async () => {
+    const { fake, newTab, navigate } = setup();
+    const tab = newTab({ cookieStoreId: WORK });
+    await navigate(tab.id);
+    assert.equal(fake.createdTabs.length, 0);
+    assert.deepEqual(fake.goBackCalls, []);
+  });
+
+  it("does nothing when no rule matches", async () => {
+    const { fake, newTab, navigate } = setup();
+    const tab = newTab();
+    await navigate(tab.id, { url: "https://other.example/" });
+    assert.equal(fake.createdTabs.length, 0);
+    assert.deepEqual(fake.goBackCalls, []);
+  });
+
+  it("ignores subframes and tabs without an id", async () => {
+    const { fake, newTab, navigate } = setup();
+    const tab = newTab();
+    await navigate(tab.id, { frameId: 3 });
+    await navigate(-1);
+    assert.equal(fake.createdTabs.length, 0);
+    assert.deepEqual(fake.goBackCalls, []);
+  });
+
+  it("does not create a tab or go back when the container is missing", async () => {
+    const { fake, routedCount, newTab, navigate } = setup();
+    fake.containers.length = 0;
+    const tab = newTab();
+    await navigate(tab.id);
+    assert.equal(fake.createdTabs.length, 0);
+    assert.deepEqual(fake.goBackCalls, []);
+    assert.equal(routedCount.n, 0);
+  });
+
+  it("does not go back when tabs.create fails", async () => {
+    const { fake, routedCount, newTab, navigate } = setup();
+    fake.control.failCreate = true;
+    const tab = newTab();
+    await navigate(tab.id);
+    assert.deepEqual(fake.goBackCalls, []);
+    assert.equal(routedCount.n, 0);
+  });
+
+  it("does not throw when goBack rejects, and routes the next navigation normally", async () => {
+    const { fake, newTab, navigate } = setup();
+    fake.control.failGoBack = true;
+    const tab = newTab();
+    await navigate(tab.id);
+    assert.equal(fake.createdTabs.length, 1);
+    await navigate(tab.id);
+    assert.equal(fake.createdTabs.length, 2);
+  });
+
+  it("ignores the history event caused by its own goBack, once", async () => {
+    const { fake, newTab, navigate } = setup();
+    const tab = newTab();
+    await navigate(tab.id);
+    // the revert lands on a page that would itself route elsewhere
+    await navigate(tab.id, { url: "https://work.example/previous" });
+    assert.equal(fake.createdTabs.length, 1);
+    await navigate(tab.id);
+    assert.equal(fake.createdTabs.length, 2);
+  });
+});
+
+
 // Shared harness for the routing suites below. Ids are globally unique because the
 // engine keeps module-level state (blank tabs, seen request ids, reverting tabs).
 describe("firefoxEngine routing (positive and negative)", () => {
@@ -350,7 +471,9 @@ describe("firefoxEngine routing (positive and negative)", () => {
         type: "main_frame",
         ...over,
       });
-    return { fake, routed, fire, newTab, request };
+    const navigate = (tabId: number, over: Record<string, unknown> = {}) =>
+      fake.listeners["onHistoryStateUpdated"]![0]!({ tabId, frameId: 0, url: "https://work.example/repo", ...over });
+    return { fake, routed, fire, newTab, request, navigate };
   }
 
   /** Captures console.warn and asserts no logged argument leaks a URL. */
@@ -676,6 +799,194 @@ describe("firefoxEngine routing (positive and negative)", () => {
         assert.deepEqual(fake.removedTabIds, []);
       } finally {
         w.restore();
+      }
+    });
+  });
+
+  describe("C. pushState fallback", () => {
+    it("positive: routes with openerTabId = old tab, goBack, old tab kept, onRouted called", async () => {
+      const { fake, routed, newTab, navigate } = harness();
+      const tab = newTab({ active: true, index: 2, windowId: 5 });
+      await navigate(tab.id);
+      assert.deepEqual(
+        { ...fake.createdTabs[0]!, id: undefined },
+        { id: undefined, url: "https://work.example/repo", cookieStoreId: WORK, active: true, index: 3, windowId: 5, openerTabId: tab.id },
+      );
+      assert.deepEqual(fake.goBackCalls, [tab.id]);
+      assert.deepEqual(fake.removedTabIds, []);
+      assert.equal(routed.n, 1);
+    });
+
+    it("positive: goBack happens only after the new tab was created", async () => {
+      const { fake, newTab, navigate } = harness();
+      const tab = newTab();
+      const order: string[] = [];
+      const b = (globalThis as any).browser.tabs;
+      const create = b.create;
+      const goBack = b.goBack;
+      b.create = async (p: unknown) => (order.push("create"), create(p));
+      b.goBack = async (id: number) => (order.push("goBack"), goBack(id));
+      await navigate(tab.id);
+      assert.deepEqual(order, ["create", "goBack"]);
+      assert.equal(fake.createdTabs.length, 1);
+    });
+
+    it("negative: subframe navigation (frameId != 0) is ignored", async () => {
+      const { fake, newTab, navigate } = harness();
+      const tab = newTab();
+      await navigate(tab.id, { frameId: 1 });
+      assert.equal(fake.createdTabs.length, 0);
+      assert.deepEqual(fake.goBackCalls, []);
+    });
+
+    it("negative: tabId < 0 is ignored", async () => {
+      const { fake, routed, navigate } = harness();
+      await navigate(-1);
+      assert.equal(fake.createdTabs.length, 0);
+      assert.deepEqual(fake.goBackCalls, []);
+      assert.equal(routed.n, 0);
+    });
+
+    it("negative: tab already in the right container -> nothing", async () => {
+      const { fake, routed, newTab, navigate } = harness();
+      const tab = newTab({ cookieStoreId: WORK });
+      await navigate(tab.id);
+      assert.equal(fake.createdTabs.length, 0);
+      assert.deepEqual(fake.goBackCalls, []);
+      assert.equal(routed.n, 0);
+    });
+
+    it("negative: resolver null -> nothing", async () => {
+      const { fake, newTab, navigate } = harness(async () => null);
+      const tab = newTab();
+      await navigate(tab.id);
+      assert.equal(fake.createdTabs.length, 0);
+      assert.deepEqual(fake.goBackCalls, []);
+    });
+
+    it("negative: resolver throws -> swallowed, nothing opened, warning has no URL", async () => {
+      const w = captureWarnings();
+      try {
+        const { fake, newTab, navigate } = harness(async () => {
+          throw new Error("rules not ready");
+        });
+        const tab = newTab();
+        await navigate(tab.id);
+        assert.equal(fake.createdTabs.length, 0);
+        assert.deepEqual(fake.goBackCalls, []);
+        w.assertNoUrls();
+      } finally {
+        w.restore();
+      }
+    });
+
+    it("negative: tabs.get rejects -> swallowed, nothing opened", async () => {
+      const w = captureWarnings();
+      try {
+        const { fake, navigate } = harness();
+        await navigate(424242);
+        assert.equal(fake.createdTabs.length, 0);
+        assert.deepEqual(fake.goBackCalls, []);
+        w.assertNoUrls();
+      } finally {
+        w.restore();
+      }
+    });
+
+    it("negative: container missing -> no create, no goBack", async () => {
+      const w = captureWarnings();
+      try {
+        const { fake, newTab, navigate } = harness();
+        fake.containers.length = 0;
+        const tab = newTab();
+        await navigate(tab.id);
+        assert.equal(fake.createdTabs.length, 0);
+        assert.deepEqual(fake.goBackCalls, []);
+        w.assertNoUrls();
+      } finally {
+        w.restore();
+      }
+    });
+
+    it("negative: tabs.create failure -> no goBack, no notification, no suppression of the next event", async () => {
+      const w = captureWarnings();
+      try {
+        const { fake, routed, newTab, navigate } = harness();
+        const tab = newTab();
+        fake.control.failCreate = true;
+        await navigate(tab.id);
+        assert.deepEqual(fake.goBackCalls, []);
+        assert.equal(routed.n, 0);
+        fake.control.failCreate = false;
+        await navigate(tab.id);
+        assert.equal(fake.createdTabs.length, 1);
+        w.assertNoUrls();
+      } finally {
+        w.restore();
+      }
+    });
+
+    it("negative: goBack rejection does not throw, logs without the URL, and clears the guard", async () => {
+      const w = captureWarnings();
+      try {
+        const { fake, newTab, navigate } = harness();
+        const tab = newTab();
+        fake.control.failGoBack = true;
+        await assert.doesNotReject(navigate(tab.id));
+        assert.ok(w.calls.length >= 1);
+        w.assertNoUrls();
+        // guard was cleared: the very next event routes instead of being swallowed
+        await navigate(tab.id);
+        assert.equal(fake.createdTabs.length, 2);
+      } finally {
+        w.restore();
+      }
+    });
+
+    it("positive: the event right after our own goBack is swallowed exactly once", async () => {
+      const { fake, newTab, navigate } = harness();
+      const tab = newTab();
+      await navigate(tab.id);
+      await navigate(tab.id, { url: "https://work.example/previous" }); // our revert
+      assert.equal(fake.createdTabs.length, 1);
+      assert.deepEqual(fake.goBackCalls, [tab.id]);
+      await navigate(tab.id, { url: "https://work.example/next" }); // genuine again
+      assert.equal(fake.createdTabs.length, 2);
+      assert.equal(fake.createdTabs[1]!.url, "https://work.example/next");
+      assert.deepEqual(fake.goBackCalls, [tab.id, tab.id]);
+    });
+
+    it("negative: the guard is per tab (another tab is not swallowed)", async () => {
+      const { fake, newTab, navigate } = harness();
+      const a = newTab();
+      const b = newTab();
+      await navigate(a.id);
+      await navigate(b.id);
+      assert.equal(fake.createdTabs.length, 2);
+      assert.deepEqual(fake.goBackCalls, [a.id, b.id]);
+    });
+
+    it("positive: the guard expires after ~1s, then a genuine pushState routes again", async () => {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      try {
+        const { fake, newTab, navigate } = harness();
+        const tab = newTab();
+        await navigate(tab.id);
+        assert.equal(fake.createdTabs.length, 1);
+        mock.timers.tick(999);
+        // still guarded: swallowed
+        await navigate(tab.id);
+        assert.equal(fake.createdTabs.length, 1);
+
+        // re-arm, then let it expire without any event arriving
+        await navigate(tab.id);
+        assert.equal(fake.createdTabs.length, 2);
+        mock.timers.tick(1000);
+        await navigate(tab.id);
+        assert.equal(fake.createdTabs.length, 3);
+        assert.equal(fake.goBackCalls.length, 3);
+      } finally {
+        mock.timers.reset();
       }
     });
   });
