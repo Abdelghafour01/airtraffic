@@ -207,7 +207,8 @@ npx web-ext run --source-dir dist/firefox --firefox=/Applications/Zen.app/Conten
 
 - **Manifest V3** — both engines target MV3; Firefox uses an event page (`background.scripts`), Chrome uses a service worker
 - **Multi-engine core** — routing logic lives in `src/core/` and is shared; `src/engines/{firefox,chrome}` each implement the same `Engine` interface (containers vs. tab groups)
-- **Loop prevention** — `tabsInTransit` Set with 5s timeout prevents infinite reopening
+- **Pre-request routing (Firefox)** — routing happens in a blocking `webRequest.onBeforeRequest` handler, before the request is sent. Only the first request of a redirect chain and only `GET` navigations are routed, so SSO redirect chains are never re-opened mid-flow. The request is cancelled and opened in the container; a tab that never loaded a page is closed, a tab with history stays on its previous page (Back keeps working). The new tab is created with `openerTabId`, so Tree Style Tab keeps the hierarchy
+- **Tab-update routing (Chrome)** — Chrome routes from `tabs.onUpdated` and moves the tab into a group
 - **Ignored URLs** — `about:`, `moz-extension:`, `chrome:` protocols are skipped
 - **Container validation** — checks container exists before creating tabs
 - **In-memory cache** — rules are cached and invalidated via `storage.onChanged`
@@ -220,6 +221,7 @@ npx web-ext run --source-dir dist/firefox --firefox=/Applications/Zen.app/Conten
 | `cookies` | Yes | — | Required by `contextualIdentities` |
 | `tabGroups` | — | Yes | Read/manage Chrome tab groups |
 | `tabs` | Yes | Yes | Intercept navigation, create/remove/group tabs |
+| `webRequest`, `webRequestBlocking` | Yes | — | Route a navigation before the request is sent (Firefox) |
 | `contextMenus` | Yes | Yes | "Open in destination" link menu |
 | `storage` | Yes | Yes | Persist routing rules and destinations |
 | `<all_urls>` (host permission) | Yes | — | Match URLs across all sites. Chrome does not need it: the `tabs` permission already exposes tab URLs |
