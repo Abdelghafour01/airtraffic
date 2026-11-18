@@ -58,6 +58,8 @@ async function applyRoute(tab: EngineTab, destinationId: string): Promise<boolea
       active: tab.active,
       index: tab.index + 1,
       windowId: tab.windowId,
+      // Keeps Tree Style Tab's hierarchy: the new tab takes the place of the closed one.
+      ...(tab.openerTabId !== undefined ? { openerTabId: tab.openerTabId } : {}),
     });
 
     if (newTab.id != null) {

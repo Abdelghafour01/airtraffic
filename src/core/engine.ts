@@ -8,6 +8,7 @@ export interface EngineTab {
   active: boolean;
   cookieStoreId?: string; // Firefox only
   groupId?: number; // Chrome only
+  openerTabId?: number; // Firefox only
 }
 
 export interface Engine {

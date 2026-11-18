@@ -13,7 +13,7 @@ function installFakeBrowser() {
   const containers: FakeContainer[] = [
     { cookieStoreId: "firefox-container-1", name: "Work", color: "blue", icon: "briefcase" },
   ];
-  const createdTabs: Array<{ id: number; url?: string; cookieStoreId?: string; active?: boolean; index?: number; windowId?: number }> = [];
+  const createdTabs: Array<{ id: number; url?: string; cookieStoreId?: string; active?: boolean; index?: number; windowId?: number; openerTabId?: number }> = [];
   const removedTabIds: number[] = [];
   let nextTabId = 100;
   let nextContainerId = 2;
@@ -102,6 +102,25 @@ describe("firefoxEngine", () => {
     assert.equal(fake.createdTabs[0].cookieStoreId, "firefox-container-1");
     assert.equal(fake.createdTabs[0].url, "https://github.com");
     assert.deepEqual(fake.removedTabIds, [5]);
+  });
+
+  it("applyRoute gives the new tab the old tab's openerTabId (Tree Style Tab keeps the parent)", async () => {
+    const fake = installFakeBrowser();
+    await firefoxEngine.applyRoute(
+      { id: 5, url: "https://github.com", windowId: 1, index: 0, active: true, openerTabId: 42 },
+      "firefox-container-1",
+    );
+    assert.equal(fake.createdTabs[0]!.openerTabId, 42);
+    assert.deepEqual(fake.removedTabIds, [5]);
+  });
+
+  it("applyRoute omits openerTabId when the old tab has none", async () => {
+    const fake = installFakeBrowser();
+    await firefoxEngine.applyRoute(
+      { id: 5, url: "https://github.com", windowId: 1, index: 0, active: true },
+      "firefox-container-1",
+    );
+    assert.equal(Object.prototype.hasOwnProperty.call(fake.createdTabs[0]!, "openerTabId"), false);
   });
 
   it("applyRoute skips silently and returns false when the destination container no longer exists", async () => {

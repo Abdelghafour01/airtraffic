@@ -26,6 +26,7 @@ interface Tab {
   active?: boolean;
   index: number;
   windowId?: number;
+  openerTabId?: number;
 }
 
 interface TabChangeInfo {
@@ -82,6 +83,7 @@ declare namespace browser {
       active?: boolean;
       index?: number;
       windowId?: number;
+      openerTabId?: number;
     }): Promise<Tab>;
     function remove(tabId: number): Promise<void>;
     function group(props: { tabIds: number[]; groupId?: number }): Promise<number>;

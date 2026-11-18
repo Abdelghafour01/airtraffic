@@ -40,6 +40,7 @@ export function runBackground(engine: Engine): void {
       active: tab.active ?? false,
       cookieStoreId: tab.cookieStoreId,
       groupId: tab.groupId,
+      openerTabId: tab.openerTabId,
     };
 
     const current = await engine.currentDestinationId(engineTab);
