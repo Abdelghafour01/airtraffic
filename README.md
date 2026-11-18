@@ -207,7 +207,7 @@ npx web-ext run --source-dir dist/firefox --firefox=/Applications/Zen.app/Conten
 
 - **Manifest V3** — both engines target MV3; Firefox uses an event page (`background.scripts`), Chrome uses a service worker
 - **Multi-engine core** — routing logic lives in `src/core/` and is shared; `src/engines/{firefox,chrome}` each implement the same `Engine` interface (containers vs. tab groups)
-- **Pre-request routing (Firefox)** — routing happens in a blocking `webRequest.onBeforeRequest` handler, before the request is sent. Only the first request of a redirect chain and only `GET` navigations are routed, so SSO redirect chains are never re-opened mid-flow. The request is cancelled and opened in the container; a tab that never loaded a page is closed, a tab with history stays on its previous page (Back keeps working). The new tab is created with `openerTabId`, so Tree Style Tab keeps the hierarchy
+- **Pre-request routing (Firefox)** — routing happens in a blocking `webRequest.onBeforeRequest` handler, before the request is sent. Only the first request of a redirect chain and only `GET` navigations are routed, so SSO redirect chains are never re-opened mid-flow. The request is cancelled and opened in the container; a tab that never loaded a page is closed, a tab with history stays on its previous page (Back keeps working). The new tab is created with `openerTabId`, so Tree Style Tab keeps the hierarchy. Same-document navigations (`history.pushState`) send no request, so `webNavigation.onHistoryStateUpdated` is used as a fallback: the URL is opened in the container as a child tab and the original tab goes back to its previous page
 - **Tab-update routing (Chrome)** — Chrome routes from `tabs.onUpdated` and moves the tab into a group
 - **Ignored URLs** — `about:`, `moz-extension:`, `chrome:` protocols are skipped
 - **Container validation** — checks container exists before creating tabs
@@ -222,6 +222,7 @@ npx web-ext run --source-dir dist/firefox --firefox=/Applications/Zen.app/Conten
 | `tabGroups` | — | Yes | Read/manage Chrome tab groups |
 | `tabs` | Yes | Yes | Intercept navigation, create/remove/group tabs |
 | `webRequest`, `webRequestBlocking` | Yes | — | Route a navigation before the request is sent (Firefox) |
+| `webNavigation` | Yes | — | Catch same-document navigations (`history.pushState`, e.g. GitHub Turbo) that never send a request (Firefox) |
 | `contextMenus` | Yes | Yes | "Open in destination" link menu |
 | `storage` | Yes | Yes | Persist routing rules and destinations |
 | `<all_urls>` (host permission) | Yes | — | Match URLs across all sites. Chrome does not need it: the `tabs` permission already exposes tab URLs |
