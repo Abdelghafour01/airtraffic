@@ -30,6 +30,7 @@ function installFakeBrowser() {
     },
   });
   const goBackCalls: number[] = [];
+  const sessionStore: Record<string, unknown> = {};
   const control = { failCreate: false, failGoBack: false, failRemove: false };
   const removedTabIds: number[] = [];
   let nextTabId = 100;
@@ -89,6 +90,17 @@ function installFakeBrowser() {
     },
     webNavigation: {
       onHistoryStateUpdated: event("onHistoryStateUpdated"),
+      onCommitted: event("onCommitted"),
+    },
+    storage: {
+      session: {
+        async get(key: string) {
+          return key in sessionStore ? { [key]: structuredClone(sessionStore[key]) } : {};
+        },
+        async set(items: Record<string, unknown>) {
+          Object.assign(sessionStore, structuredClone(items));
+        },
+      },
     },
     webRequest: {
       onBeforeRequest: event("onBeforeRequest"),
@@ -97,7 +109,7 @@ function installFakeBrowser() {
     },
   };
 
-  return { containers, createdTabs, removedTabIds, existingTabs, listeners, control, goBackCalls };
+  return { containers, createdTabs, removedTabIds, existingTabs, listeners, control, goBackCalls, sessionStore };
 }
 
 describe("firefoxEngine", () => {
@@ -424,7 +436,10 @@ describe("firefoxEngine same-document navigation (history.pushState)", () => {
     const tab = newTab();
     await navigate(tab.id);
     assert.equal(fake.createdTabs.length, 1);
+    // the tab still shows the first page: a same-page update is ignored, another path routes
     await navigate(tab.id);
+    assert.equal(fake.createdTabs.length, 1);
+    await navigate(tab.id, { url: "https://work.example/next" });
     assert.equal(fake.createdTabs.length, 2);
   });
 
@@ -918,7 +933,8 @@ describe("firefoxEngine routing (positive and negative)", () => {
         assert.deepEqual(fake.goBackCalls, []);
         assert.equal(routed.n, 0);
         fake.control.failCreate = false;
-        await navigate(tab.id);
+        // a different page: the same URL again would be a same-page update and is ignored
+        await navigate(tab.id, { url: "https://work.example/next" });
         assert.equal(fake.createdTabs.length, 1);
         w.assertNoUrls();
       } finally {
@@ -936,7 +952,7 @@ describe("firefoxEngine routing (positive and negative)", () => {
         assert.ok(w.calls.length >= 1);
         w.assertNoUrls();
         // guard was cleared: the very next event routes instead of being swallowed
-        await navigate(tab.id);
+        await navigate(tab.id, { url: "https://work.example/next" });
         assert.equal(fake.createdTabs.length, 2);
       } finally {
         w.restore();
@@ -974,20 +990,186 @@ describe("firefoxEngine routing (positive and negative)", () => {
         await navigate(tab.id);
         assert.equal(fake.createdTabs.length, 1);
         mock.timers.tick(999);
-        // still guarded: swallowed
-        await navigate(tab.id);
+        // still guarded: swallowed (the revert lands on the previous page)
+        await navigate(tab.id, { url: "https://work.example/previous" });
         assert.equal(fake.createdTabs.length, 1);
 
         // re-arm, then let it expire without any event arriving
         await navigate(tab.id);
         assert.equal(fake.createdTabs.length, 2);
         mock.timers.tick(1000);
-        await navigate(tab.id);
+        await navigate(tab.id, { url: "https://work.example/previous" });
         assert.equal(fake.createdTabs.length, 3);
         assert.equal(fake.goBackCalls.length, 3);
       } finally {
         mock.timers.reset();
       }
+    });
+  });
+
+  describe("D. history updates on a page that already loaded (GitHub search bar bug)", () => {
+    // A tab can sit on a URL that matches a rule while in another container, e.g. after a
+    // redirect chain (only the first hop is routed). Then page scripts call pushState or
+    // replaceState on that same page (search bar focus adds ?q=, a hash, or a state entry).
+    // That must not open a new tab or send the tab back.
+    async function landOnRoutedPageViaRedirect(h: ReturnType<typeof harness>) {
+      const tab = h.newTab({ active: true });
+      await h.request(tab.id, { requestId: `redir-${tab.id}`, url: "https://other.example/start" });
+      await h.request(tab.id, { requestId: `redir-${tab.id}`, url: WORK_URL });
+      h.fire("onCommitted", { tabId: tab.id, frameId: 0, url: WORK_URL });
+      assert.equal(h.fake.createdTabs.length, 0, "setup: redirect landing is not routed");
+      return tab;
+    }
+
+    for (const [name, url] of [
+      ["the same URL (replaceState)", WORK_URL],
+      ["only the query changed", `${WORK_URL}?q=abc`],
+      ["only the hash changed", `${WORK_URL}#search`],
+    ] as const) {
+      it(`negative: ${name} -> no new tab, no goBack`, async () => {
+        const h = harness();
+        const tab = await landOnRoutedPageViaRedirect(h);
+        await h.navigate(tab.id, { url });
+        assert.equal(h.fake.createdTabs.length, 0);
+        assert.deepEqual(h.fake.goBackCalls, []);
+        assert.equal(h.routed.n, 0);
+      });
+    }
+
+    it("negative: repeated same-page updates never route", async () => {
+      const h = harness();
+      const tab = await landOnRoutedPageViaRedirect(h);
+      await h.navigate(tab.id, { url: `${WORK_URL}?q=a` });
+      await h.navigate(tab.id, { url: `${WORK_URL}?q=ab` });
+      assert.equal(h.fake.createdTabs.length, 0);
+      assert.deepEqual(h.fake.goBackCalls, []);
+    });
+
+    it("positive: a pushState to another path of the routed site still routes", async () => {
+      const h = harness();
+      const tab = await landOnRoutedPageViaRedirect(h);
+      await h.navigate(tab.id, { url: "https://work.example/other-path" });
+      assert.equal(h.fake.createdTabs.length, 1);
+      assert.deepEqual(h.fake.goBackCalls, [tab.id]);
+    });
+
+    it("positive: a cancelled (routed) request is not recorded, so a later history event still routes", async () => {
+      const h = harness();
+      const tab = h.newTab();
+      const res = await h.request(tab.id);
+      assert.deepEqual(res, { cancel: true });
+      await h.navigate(tab.id, { url: WORK_URL });
+      assert.equal(h.fake.createdTabs.length, 2);
+    });
+
+    it("positive: a tab without any record routes as before", async () => {
+      const h = harness();
+      const tab = h.newTab();
+      await h.navigate(tab.id, { url: WORK_URL });
+      assert.equal(h.fake.createdTabs.length, 1);
+    });
+
+    it("positive: a committed page on another site does not hide a pushState to a routed page", async () => {
+      const h = harness();
+      const tab = h.newTab();
+      h.fire("onCommitted", { tabId: tab.id, frameId: 0, url: "https://other.example/x" });
+      await h.navigate(tab.id, { url: WORK_URL });
+      assert.equal(h.fake.createdTabs.length, 1);
+    });
+
+    it("ignores commits of subframes and of tabs without an id", async () => {
+      const h = harness();
+      const tab = h.newTab();
+      h.fire("onCommitted", { tabId: tab.id, frameId: 4, url: WORK_URL });
+      h.fire("onCommitted", { tabId: -1, frameId: 0, url: WORK_URL });
+      await h.navigate(tab.id, { url: WORK_URL });
+      assert.equal(h.fake.createdTabs.length, 1);
+    });
+
+    it("positive: closing the tab clears its record", async () => {
+      const h = harness();
+      const tab = await landOnRoutedPageViaRedirect(h);
+      h.fire("tabs.onRemoved", tab.id);
+      await h.navigate(tab.id, { url: WORK_URL });
+      assert.equal(h.fake.createdTabs.length, 1);
+    });
+
+    it("negative: goBack failure keeps the record, so the same page is not routed again", async () => {
+      const w = captureWarnings();
+      try {
+        const h = harness();
+        h.fake.control.failGoBack = true;
+        const tab = h.newTab();
+        await h.navigate(tab.id, { url: WORK_URL });
+        assert.equal(h.fake.createdTabs.length, 1);
+        await h.navigate(tab.id, { url: `${WORK_URL}?q=abc` });
+        assert.equal(h.fake.createdTabs.length, 1);
+      } finally {
+        w.restore();
+      }
+    });
+
+    it("negative: after our own revert the baseline is the page we went back to", async () => {
+      const h = harness();
+      const tab = h.newTab();
+      await h.navigate(tab.id, { url: WORK_URL });
+      assert.equal(h.fake.createdTabs.length, 1);
+      await h.navigate(tab.id, { url: "https://work.example/previous" }); // our goBack, swallowed
+      await h.navigate(tab.id, { url: "https://work.example/previous?x=1" });
+      assert.equal(h.fake.createdTabs.length, 1);
+    });
+
+    it("positive: a rule that matches on the query still routes a same-path update", async () => {
+      const h = harness(async (url, current) => (url.includes("org=acme") && current !== WORK ? WORK : null));
+      const tab = h.newTab();
+      h.fire("onCommitted", { tabId: tab.id, frameId: 0, url: "https://app.example/app" });
+      await h.navigate(tab.id, { url: "https://app.example/app?org=acme" });
+      assert.equal(h.fake.createdTabs.length, 1);
+      assert.deepEqual(h.fake.goBackCalls, [tab.id]);
+    });
+
+    for (const [name, url] of [
+      ["another origin", "https://sub.work.example/a"],
+      ["another scheme", "http://work.example/a"],
+      ["a trailing slash", `${WORK_URL}/`],
+    ] as const) {
+      it(`positive: ${name} is not the same page`, async () => {
+        const h = harness(async (u, current) => (u.includes("work.example") && current !== WORK ? WORK : null));
+        const tab = h.newTab();
+        h.fire("onCommitted", { tabId: tab.id, frameId: 0, url: WORK_URL });
+        await h.navigate(tab.id, { url });
+        assert.equal(h.fake.createdTabs.length, 1);
+      });
+    }
+
+    it("does not throw on a malformed URL", async () => {
+      const h = harness();
+      const tab = h.newTab();
+      h.fire("onCommitted", { tabId: tab.id, frameId: 0, url: WORK_URL });
+      await assert.doesNotReject(h.navigate(tab.id, { url: "::" }));
+    });
+
+    it("keeps working after the background page was suspended (record restored from storage.session)", async () => {
+      const fake = installFakeBrowser();
+      const id = nextId++;
+      fake.existingTabs.set(id, { id, url: WORK_URL, index: 3, windowId: 7, active: true, cookieStoreId: "firefox-default" });
+      fake.sessionStore["lastUrls"] = { [String(id)]: WORK_URL }; // written before the suspension
+      firefoxEngine.startPreRequestRouting!(
+        async (url, current) => (url.startsWith("https://work.example") && current !== WORK ? WORK : null),
+        () => {},
+      );
+      await fake.listeners["onHistoryStateUpdated"]![0]!({ tabId: id, frameId: 0, url: `${WORK_URL}?q=abc` });
+      assert.equal(fake.createdTabs.length, 0);
+      assert.deepEqual(fake.goBackCalls, []);
+    });
+
+    it("writes the record to storage.session and removes it when the tab closes", async () => {
+      const h = harness();
+      const tab = h.newTab();
+      h.fire("onCommitted", { tabId: tab.id, frameId: 0, url: WORK_URL });
+      assert.equal((h.fake.sessionStore["lastUrls"] as Record<string, string>)[String(tab.id)], WORK_URL);
+      h.fire("tabs.onRemoved", tab.id);
+      assert.equal((h.fake.sessionStore["lastUrls"] as Record<string, string>)[String(tab.id)], undefined);
     });
   });
 });

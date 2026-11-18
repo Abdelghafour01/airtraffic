@@ -10,6 +10,46 @@ const revertingTabs = new Set<number>();
 const blankTabs = new Set<number>();
 // Request ids of main_frame navigations already seen. Firefox keeps the id across a redirect chain.
 const seenRequests = new Set<string>();
+// Last URL each tab is known to show (set on document commit and on history events). Lets us ignore
+// history updates that stay on the same page. Mirrored to storage.session because the MV3 event page
+// is suspended after ~30 s idle and would otherwise forget it.
+const LAST_URLS_KEY = "lastUrls";
+const lastUrls = new Map<number, string>();
+let lastUrlsLoaded: Promise<void> = Promise.resolve();
+
+function loadLastUrls(): void {
+  lastUrlsLoaded = browser.storage.session
+    .get(LAST_URLS_KEY)
+    .then((stored) => {
+      const saved = (stored[LAST_URLS_KEY] ?? {}) as Record<string, string>;
+      for (const [id, url] of Object.entries(saved)) {
+        if (!lastUrls.has(Number(id))) lastUrls.set(Number(id), url);
+      }
+    })
+    .catch(() => {});
+}
+
+function saveLastUrls(): void {
+  Promise.resolve(browser.storage.session.set({ [LAST_URLS_KEY]: Object.fromEntries(lastUrls) })).catch(() => {});
+}
+
+function rememberUrl(tabId: number, url: string | undefined): void {
+  if (url === undefined) lastUrls.delete(tabId);
+  else lastUrls.set(tabId, url);
+  saveLastUrls();
+}
+
+// True when both URLs have the same origin and path (only query or hash may differ).
+function isSamePage(a: string | undefined, b: string): boolean {
+  if (!a) return false;
+  try {
+    const x = new URL(a);
+    const y = new URL(b);
+    return x.origin === y.origin && x.pathname === y.pathname;
+  } catch {
+    return false;
+  }
+}
 
 function isBlankUrl(url: string | undefined): boolean {
   return !url || url === "about:blank" || url === "about:newtab" || url === "about:home";
@@ -100,6 +140,14 @@ function startPreRequestRouting(resolve: PreRequestResolver, onRouted: () => voi
   });
   browser.tabs.onRemoved.addListener((tabId) => {
     blankTabs.delete(tabId);
+    if (lastUrls.has(tabId)) rememberUrl(tabId, undefined);
+  });
+
+  loadLastUrls();
+  // A document that really loaded (not a cancelled, download or 204 request). Also fires for
+  // back/forward restores, so the record follows what the tab shows.
+  browser.webNavigation.onCommitted.addListener((details) => {
+    if (details.frameId === 0 && details.tabId >= 0) rememberUrl(details.tabId, details.url);
   });
 
   const forget = (details: browser.webRequest.RequestDetails) => {
@@ -161,6 +209,9 @@ function startPreRequestRouting(resolve: PreRequestResolver, onRouted: () => voi
   // Redirect chains are not handled here: they stay with the first-request rule above.
   browser.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
     if (details.frameId !== 0 || details.tabId < 0) return;
+    await lastUrlsLoaded;
+    const previousUrl = lastUrls.get(details.tabId);
+    rememberUrl(details.tabId, details.url);
     if (revertingTabs.delete(details.tabId)) return;
 
     try {
@@ -175,15 +226,22 @@ function startPreRequestRouting(resolve: PreRequestResolver, onRouted: () => voi
       };
       const destinationId = await resolve(details.url, await currentDestinationId(engineTab));
       if (!destinationId) return;
+      // pushState/replaceState on the page already shown (search box adds ?q=, hash, state) is not a
+      // navigation. Rules may match on query or hash, so skip only if the page routed the same way.
+      if (isSamePage(previousUrl, details.url) && (await resolve(previousUrl!, engineTab.cookieStoreId ?? "")) === destinationId) {
+        return;
+      }
       if (!(await openInContainer(engineTab, destinationId, details.tabId))) return;
       onRouted();
 
+      rememberUrl(details.tabId, undefined); // goes back to a page we have not seen
       revertingTabs.add(details.tabId);
       setTimeout(() => revertingTabs.delete(details.tabId), REVERT_SUPPRESS_MS);
       try {
         await browser.tabs.goBack(details.tabId);
       } catch (err) {
         revertingTabs.delete(details.tabId);
+        rememberUrl(details.tabId, details.url); // the tab still shows the pushState page
         console.warn(`[Air Traffic] Failed to send tab ${details.tabId} back`, err);
       }
     } catch (err) {

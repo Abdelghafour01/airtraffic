@@ -54,6 +54,7 @@ interface BrowserEvent<T extends (...args: never[]) => void> {
 declare namespace browser {
   namespace storage {
     const local: StorageArea;
+    const session: StorageArea;
     const sync: StorageArea;
     const onChanged: BrowserEvent<(changes: Record<string, StorageChange>, area: string) => void>;
   }
@@ -126,6 +127,12 @@ declare namespace browser {
       frameId: number;
       url: string;
     }
+    interface CommittedDetails {
+      tabId: number;
+      frameId: number;
+      url: string;
+    }
+    const onCommitted: BrowserEvent<(details: CommittedDetails) => void>;
     const onHistoryStateUpdated: BrowserEvent<(details: HistoryStateDetails) => void>;
   }
 
